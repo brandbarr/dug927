@@ -1,0 +1,250 @@
+# Taskfile for the DUG demo org — "Intro to Claude and Salesforce"
+#
+#   task doctor     check the CLI, the org and its user licences
+#   task setup      load everything and verify it (the one you want)
+#   task verify     re-run the checks without reloading
+#   task clean      remove all demo data
+#
+# Requirements: go-task 3.28+ (https://taskfile.dev) and Salesforce CLI v2 (`sf`).
+#
+# Targets an org you have ALREADY authenticated, by alias. Override the alias
+# per-invocation or in the environment:
+#   task setup ORG=my-dev-org
+#   export ORG=my-dev-org
+#
+# This repo has no SFDX project scaffolding (no sfdx-project.json), so there is
+# no scratch-org flow here — `task login` authenticates a Developer Edition org
+# or a sandbox instead. Scratch orgs would need project files adding first.
+
+version: '3'
+
+vars:
+  ORG: '{{.ORG | default "dug-demo"}}'
+  APEX: demo-org/apex
+
+env:
+  SF_DISABLE_TELEMETRY: 'true'
+
+tasks:
+  default:
+    desc: List the available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  # ---------------------------------------------------------------------------
+  # Preflight
+  # ---------------------------------------------------------------------------
+  cli:
+    internal: true
+    run: once
+    preconditions:
+      - sh: command -v sf
+        msg: |
+          Salesforce CLI not found. Install it, then re-run:
+            npm install --global @salesforce/cli
+          (or see https://developer.salesforce.com/tools/salesforcecli)
+
+  auth:
+    internal: true
+    run: once
+    deps: [cli]
+    preconditions:
+      - sh: sf org display --target-org {{.ORG}} >/dev/null 2>&1
+        msg: |
+          No authenticated org with the alias "{{.ORG}}".
+          Authenticate one:      task login ORG={{.ORG}}
+          Or point at another:   task setup ORG=my-other-alias
+          See what you have:     sf org list
+
+  # The Apex scripts each assert on this too — belt and braces, but failing here
+  # gives a clear message before anything runs, rather than a stack trace.
+  guard:
+    internal: true
+    run: once
+    deps: [auth]
+    cmds:
+      - |
+        row=$(sf data query --target-org {{.ORG}} --result-format csv \
+                --query "SELECT Name, OrganizationType, IsSandbox FROM Organization" \
+              | tail -1)
+        echo "Target org: $row"
+        case "$row" in
+          *"Developer Edition"*|*true*) ;;
+          *)
+            echo ""
+            echo "REFUSING TO CONTINUE."
+            echo "\"{{.ORG}}\" is not a Developer Edition org or a sandbox."
+            echo "Never load demo data into a real org, and never put one on screen."
+            exit 1
+            ;;
+        esac
+
+  login:
+    desc: Authenticate a Developer Edition org or sandbox as ORG
+    deps: [cli]
+    cmds:
+      - sf org login web --alias {{.ORG}} --instance-url https://login.salesforce.com
+      - echo ""
+      - echo "Authenticated as {{.ORG}}. Next: task doctor ORG={{.ORG}}"
+
+  login:sandbox:
+    desc: Authenticate a sandbox as ORG (uses test.salesforce.com)
+    deps: [cli]
+    cmds:
+      - sf org login web --alias {{.ORG}} --instance-url https://test.salesforce.com
+
+  doctor:
+    desc: Check the CLI, the target org, and whether it can support multiple deal owners
+    deps: [guard]
+    cmds:
+      - |
+        echo ""
+        echo "Salesforce CLI:"
+        sf --version
+        echo ""
+        echo "Org:"
+        sf org display --target-org {{.ORG}}
+        echo ""
+        echo "Salesforce user licences (deal owners come from these):"
+        sf data query --target-org {{.ORG}} \
+          --query "SELECT Name, TotalLicenses, UsedLicenses FROM UserLicense WHERE Name = 'Salesforce'"
+        echo ""
+        echo "Active users who could own opportunities:"
+        sf data query --target-org {{.ORG}} \
+          --query "SELECT COUNT(Id) FROM User WHERE IsActive = true AND UserType = 'Standard'"
+        echo ""
+        echo "One such user means every deal will be yours and the dashboard's"
+        echo "\"filter by owner\" demo is a no-op. A Developer Edition org ships with"
+        echo "2 Salesforce licences, so you can add exactly one more owner there;"
+        echo "Platform licences cannot own opportunities. For more variety than that,"
+        echo "use a sandbox of a fuller org."
+
+  # ---------------------------------------------------------------------------
+  # Loading. Order matters: 02-04 look up records that 01 creates.
+  # ---------------------------------------------------------------------------
+  setup:
+    desc: Load all demo data into ORG and verify it (re-runnable, nothing accumulates)
+    deps: [guard]
+    cmds:
+      - task: load:core
+      - task: load:service
+      - task: load:marketing
+      - task: load:products
+      - task: verify
+      - |
+        echo ""
+        echo "Done. Open it:  task open ORG={{.ORG}}"
+        echo "Still to do by hand: the Cowork \"Acme\" folder with meeting notes,"
+        echo "the Hosted MCP connector, and screenshots for slides 16-18."
+
+  load:core:
+    desc: "01 — accounts, contacts, opportunities, activities (1,577 records)"
+    deps: [guard]
+    cmds:
+      - echo "=== 01 core: accounts, contacts, opportunities, activities ==="
+      - sf apex run --target-org {{.ORG}} --file {{.APEX}}/01_load_core.apex
+
+  load:service:
+    desc: "02 — cases and case comments (98 records)"
+    deps: [guard]
+    cmds:
+      - echo "=== 02 service: cases, case comments ==="
+      - sf apex run --target-org {{.ORG}} --file {{.APEX}}/02_load_service.apex
+
+  load:marketing:
+    desc: "03 — campaigns, leads, campaign members (363 records)"
+    deps: [guard]
+    cmds:
+      - echo "=== 03 marketing: campaigns, leads, campaign members ==="
+      - sf apex run --target-org {{.ORG}} --file {{.APEX}}/03_load_marketing.apex
+
+  load:products:
+    desc: "04 — products and opportunity line items (740 records)"
+    deps: [guard]
+    cmds:
+      - echo "=== 04 products: products, price book entries, line items ==="
+      - sf apex run --target-org {{.ORG}} --file {{.APEX}}/04_load_products.apex
+
+  # ---------------------------------------------------------------------------
+  # Verification
+  # ---------------------------------------------------------------------------
+  verify:
+    desc: "05 — run the demo's own queries and report PASS/FAIL per check"
+    deps: [auth]
+    cmds:
+      - echo "=== 05 verify ==="
+      - sf apex run --target-org {{.ORG}} --file {{.APEX}}/05_verify_demo.apex
+      - |
+        echo ""
+        echo "Read the USER_DEBUG lines above. Any FAIL needs fixing before Thursday;"
+        echo "WARN lines are usable but weaken a demo beat."
+
+  smoke:
+    desc: Run the demo's first query from the CLI, to see the data with your own eyes
+    deps: [auth]
+    cmds:
+      - |
+        echo "Quiet deals closing this quarter, largest first:"
+        echo "(all owners — SOQL has no current-user literal, so this drops the \"my\""
+        echo " filter. Script 05 runs the exact \"my opportunities\" version from Apex,"
+        echo " where the running user is available.)"
+        echo ""
+        sf data query --target-org {{.ORG}} --query "
+          SELECT Name, Amount, StageName, CloseDate, LastActivityDate, Owner.Alias
+          FROM Opportunity
+          WHERE Account.AccountNumber LIKE 'DUG-DEMO-%'
+            AND IsClosed = false
+            AND CloseDate = THIS_QUARTER
+            AND (LastActivityDate < LAST_N_DAYS:14 OR LastActivityDate = null)
+          ORDER BY Amount DESC
+          LIMIT 10"
+      - |
+        echo ""
+        echo "Acme Manufacturing's renewal at \$250,000 should be the first row."
+
+  # ---------------------------------------------------------------------------
+  # Teardown
+  # ---------------------------------------------------------------------------
+  clean:
+    desc: Remove ALL demo data from ORG (accounts, leads, campaigns, products)
+    deps: [guard]
+    prompt: This deletes every DUG demo record from "{{.ORG}}". Continue?
+    cmds:
+      - sf apex run --target-org {{.ORG}} --file {{.APEX}}/00_cleanup.apex
+
+  reload:
+    desc: Clean, then load and verify from scratch
+    deps: [guard]
+    cmds:
+      - task: clean
+      - task: setup
+
+  # ---------------------------------------------------------------------------
+  # Convenience
+  # ---------------------------------------------------------------------------
+  open:
+    desc: Open ORG in a browser
+    deps: [auth]
+    cmds:
+      - sf org open --target-org {{.ORG}}
+
+  open:acme:
+    desc: Open the Acme Manufacturing account record straight away
+    deps: [auth]
+    cmds:
+      - |
+        id=$(sf data query --target-org {{.ORG}} --result-format csv \
+               --query "SELECT Id FROM Account WHERE Name = 'Acme Manufacturing' AND AccountNumber LIKE 'DUG-DEMO-%'" \
+             | tail -1 | tr -d '"\r')
+        if [ -z "$id" ]; then
+          echo "No Acme account found. Run: task setup ORG={{.ORG}}"
+          exit 1
+        fi
+        sf org open --target-org {{.ORG}} --path "/lightning/r/Account/$id/view"
+
+  orgs:
+    desc: List the orgs you have authenticated
+    deps: [cli]
+    cmds:
+      - sf org list

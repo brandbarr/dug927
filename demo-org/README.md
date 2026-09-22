@@ -4,9 +4,25 @@ Anonymous Apex to build the demo environment for the DUG session *Intro to
 Claude and Salesforce* — the Acme Manufacturing story plus enough surrounding
 data that the org reads like a real one rather than a fixture.
 
-**2,778 records across 11 objects.** Run these in **Developer Console → Debug →
-Open Execute Anonymous Window**, with *Open Log* checked so you can read the
-`USER_DEBUG` output.
+**2,778 records across 11 objects.**
+
+There are two ways to run them. Either drive the whole thing from the repo root
+with [go-task](https://taskfile.dev) and the Salesforce CLI:
+
+```
+task doctor ORG=my-dev-org     # check the CLI, the org, and its user licences
+task setup  ORG=my-dev-org     # load everything and verify it
+```
+
+`task setup` runs the four loaders in order and then the verifier, refusing to
+start unless the target org is a Developer Edition org or a sandbox. It is
+re-runnable — nothing accumulates. `task --list` shows the rest (`verify`,
+`smoke`, `clean`, `reload`, `open:acme`). The Taskfile needs go-task 3.28+ and
+`sf` v2, and targets an org you have already authenticated by alias.
+
+Or paste each script by hand into **Developer Console → Debug → Open Execute
+Anonymous Window**, with *Open Log* checked so you can read the `USER_DEBUG`
+output. Same scripts, same order.
 
 ## Run order
 
@@ -102,11 +118,16 @@ forecasting tie-in at 3:15, if you want to gesture at it.
 - **Developer Edition org or a sandbox.** Every script asserts on this and
   refuses to run anywhere else, matching "Never use a real client org on
   screen." To override, delete the assert block at the top.
-- **Create 3–5 extra active users first.** This matters more at 250 accounts
-  than it did at 20: with one user, all 250 accounts are yours and the
-  dashboard's "filter by owner" is a no-op. Script 01 spreads ownership across
-  up to six users, keeping Acme and a large share of the at-risk deals with you.
-  It warns in the debug log if it finds only one.
+- **Add another user if you can.** With one user, all 250 accounts are yours and
+  the dashboard's "filter by owner" is a no-op. Script 01 spreads ownership
+  across up to six users, keeping Acme and a large share of the at-risk deals
+  with you, and warns in the debug log if it finds only one.
+
+  The constraint: a **Developer Edition org ships with 2 Salesforce licences**,
+  so you can add exactly one more opportunity owner there — two groups, which is
+  enough for the filter to do something visible. Platform licences cannot own
+  opportunities, so they do not help. For real owner variety you need a sandbox
+  of a fuller org. `task doctor` prints your licence counts.
 - Your user needs create access on Account, Contact, Opportunity, Task, Event,
   Case, Lead, Campaign, Product2 and OpportunityLineItem.
 
